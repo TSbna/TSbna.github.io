@@ -27,6 +27,9 @@ SPBE:2"></textarea>
                     <button onclick="savePortfolio()">💾 Сохранить портфель</button>
                     <button onclick="loadPortfolio()">🔄 Загрузить портфель</button>
                 </div>
+                <div class="portfolio-info">
+                    <small>Данные сохраняются в браузере и синхронизируются с сервером</small>
+                </div>
             </div>
 
             <!-- Блок генерации отчета -->
@@ -42,7 +45,9 @@ SPBE:2"></textarea>
             <!-- Блок отображения портфеля -->
             <div class="card">
                 <h2>💰 Текущий портфель</h2>
-                <div id="portfolioDisplay" class="portfolio-display"></div>
+                <div id="portfolioDisplay" class="portfolio-display">
+                    <p>Загрузка портфеля...</p>
+                </div>
                 <canvas id="portfolioChart" width="400" height="200"></canvas>
             </div>
 
@@ -54,12 +59,12 @@ SPBE:2"></textarea>
                     <button onclick="downloadReport()">💾 Скачать отчет</button>
                     <button onclick="sendToAI()">📤 Отправить AI</button>
                 </div>
-                <pre id="reportOutput" class="report-output"></pre>
+                <pre id="reportOutput" class="report-output">Отчет будет отображен здесь после генерации</pre>
             </div>
         </div>
 
         <footer>
-            <p>Автоматическая отправка отчетов настроена через GitHub Actions</p>
+            <p>Автоматическая отправка отчетов настроена через GitHub Actions | Обновлено: 2024</p>
         </footer>
     </div>
 
