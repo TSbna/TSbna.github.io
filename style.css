@@ -4,9 +4,17 @@
     box-sizing: border-box;
 }
 
+:root {
+    --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    --success-color: #c6f6d5;
+    --error-color: #fed7d7;
+    --info-color: #bee3f8;
+    --warning-color: #feebc8;
+}
+
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: var(--primary-gradient);
     min-height: 100vh;
     color: #333;
 }
@@ -46,11 +54,24 @@ header p {
     border-radius: 15px;
     padding: 25px;
     box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-    transition: transform 0.3s ease;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: var(--primary-gradient);
 }
 
 .card:hover {
     transform: translateY(-5px);
+    box-shadow: 0 15px 40px rgba(0,0,0,0.3);
 }
 
 .card h2 {
@@ -70,14 +91,26 @@ header p {
     padding: 15px;
     border: 2px solid #e2e8f0;
     border-radius: 10px;
-    font-family: monospace;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     font-size: 14px;
     resize: vertical;
     margin-bottom: 15px;
+    transition: border-color 0.3s ease;
+}
+
+.portfolio-editor textarea:focus {
+    outline: none;
+    border-color: #667eea;
+}
+
+.portfolio-info {
+    margin-top: 10px;
+    color: #718096;
+    font-size: 0.9em;
 }
 
 button {
-    background: linear-gradient(135deg, #667eea, #764ba2);
+    background: var(--primary-gradient);
     color: white;
     border: none;
     padding: 12px 25px;
@@ -87,6 +120,23 @@ button {
     font-weight: 600;
     margin: 5px;
     transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+button::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+    transition: left 0.5s;
+}
+
+button:hover::before {
+    left: 100%;
 }
 
 button:hover {
@@ -96,6 +146,12 @@ button:hover {
 
 button:active {
     transform: translateY(0);
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
 }
 
 .report-controls, .report-actions {
@@ -110,24 +166,31 @@ button:active {
     border-radius: 8px;
     margin-top: 15px;
     font-weight: 500;
+    transition: all 0.3s ease;
 }
 
 .status.success {
-    background: #c6f6d5;
+    background: var(--success-color);
     color: #22543d;
     border: 1px solid #9ae6b4;
 }
 
 .status.error {
-    background: #fed7d7;
+    background: var(--error-color);
     color: #742a2a;
     border: 1px solid #feb2b2;
 }
 
 .status.info {
-    background: #bee3f8;
+    background: var(--info-color);
     color: #1a365d;
     border: 1px solid #90cdf4;
+}
+
+.status.warning {
+    background: var(--warning-color);
+    color: #744210;
+    border: 1px solid #faf089;
 }
 
 .portfolio-display {
@@ -136,6 +199,8 @@ button:active {
     border-radius: 8px;
     border: 1px solid #e2e8f0;
     margin-bottom: 20px;
+    max-height: 200px;
+    overflow-y: auto;
 }
 
 .asset-item {
@@ -143,6 +208,11 @@ button:active {
     justify-content: space-between;
     padding: 8px 0;
     border-bottom: 1px solid #e2e8f0;
+    transition: background-color 0.2s ease;
+}
+
+.asset-item:hover {
+    background-color: #edf2f7;
 }
 
 .asset-item:last-child {
@@ -154,13 +224,32 @@ button:active {
     color: #cbd5e0;
     padding: 20px;
     border-radius: 8px;
-    font-family: 'Courier New', monospace;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     font-size: 14px;
     line-height: 1.5;
     white-space: pre-wrap;
     max-height: 500px;
     overflow-y: auto;
     margin-top: 15px;
+    border: 1px solid #2d3748;
+}
+
+.report-output::-webkit-scrollbar {
+    width: 8px;
+}
+
+.report-output::-webkit-scrollbar-track {
+    background: #2d3748;
+    border-radius: 4px;
+}
+
+.report-output::-webkit-scrollbar-thumb {
+    background: #4a5568;
+    border-radius: 4px;
+}
+
+.report-output::-webkit-scrollbar-thumb:hover {
+    background: #718096;
 }
 
 footer {
@@ -168,6 +257,7 @@ footer {
     color: white;
     margin-top: 40px;
     opacity: 0.8;
+    font-size: 0.9em;
 }
 
 /* Адаптивность */
@@ -183,12 +273,38 @@ footer {
     header h1 {
         font-size: 2em;
     }
+    
+    .report-controls, .report-actions {
+        flex-direction: column;
+    }
+    
+    button {
+        width: 100%;
+        margin: 5px 0;
+    }
 }
 
 /* Анимации */
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(20px); }
-    to { opacity: 1; transform: translateY(0); }
+    from { 
+        opacity: 0; 
+        transform: translateY(20px); 
+    }
+    to { 
+        opacity: 1; 
+        transform: translateY(0); 
+    }
+}
+
+@keyframes slideIn {
+    from { 
+        transform: translateX(-100%); 
+        opacity: 0; 
+    }
+    to { 
+        transform: translateX(0); 
+        opacity: 1; 
+    }
 }
 
 .card {
@@ -208,4 +324,55 @@ footer {
 
 @keyframes spin {
     to { transform: rotate(360deg); }
+}
+
+/* Progress bar */
+.progress-bar {
+    width: 100%;
+    height: 4px;
+    background: #e2e8f0;
+    border-radius: 2px;
+    overflow: hidden;
+    margin: 10px 0;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--primary-gradient);
+    transition: width 0.3s ease;
+    animation: progressAnimation 2s ease-in-out infinite;
+}
+
+@keyframes progressAnimation {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+/* Tooltip */
+.tooltip {
+    position: relative;
+    display: inline-block;
+}
+
+.tooltip .tooltiptext {
+    visibility: hidden;
+    width: 200px;
+    background-color: #2d3748;
+    color: white;
+    text-align: center;
+    border-radius: 6px;
+    padding: 8px;
+    position: absolute;
+    z-index: 1;
+    bottom: 125%;
+    left: 50%;
+    transform: translateX(-50%);
+    opacity: 0;
+    transition: opacity 0.3s;
+    font-size: 12px;
+}
+
+.tooltip:hover .tooltiptext {
+    visibility: visible;
+    opacity: 1;
 }
