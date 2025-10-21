@@ -2,17 +2,26 @@ name: Auto Trading Report
 
 on:
   schedule:
-    # Каждый день в 9:00 и 18:00 по Москве
+    # Каждый день в 9:00 и 18:00 по Москве (6:00 и 15:00 UTC)
     - cron: '0 6,15 * * *'
   workflow_dispatch: # Ручной запуск
+  push:
+    branches: [ main ]
+    paths: 
+      - 'portfolio.json'
+      - '.github/workflows/auto-report.yml'
+      - 'generate_report.py'
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
     - name: 📥 Checkout repository
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
       
     - name: 🐍 Setup Python
       uses: actions/setup-python@v4
@@ -24,16 +33,47 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests
         
+    - name: 🔍 Validate portfolio
+      run: |
+        python -c "
+        import json, os
+        try:
+            with open('portfolio.json', 'r') as f:
+                data = json.load(f)
+            assert isinstance(data, dict), 'Portfolio must be a dictionary'
+            for k, v in data.items():
+                assert isinstance(k, str), 'Keys must be strings'
+                assert isinstance(v, (int, float)) and v > 0, 'Values must be positive numbers'
+            print('✅ Portfolio validation passed')
+        except Exception as e:
+            print(f'❌ Portfolio validation failed: {e}')
+            exit(1)
+        "
+        
     - name: 🤖 Generate trading report
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      run: python .github/scripts/generate_report.py
+      run: python generate_report.py
       
     - name: 📊 Commit and push report
+      if: always()
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add reports/
-        git commit -m "🤖 Auto-generated trading report $(date +'%Y-%m-%d %H:%M')" || exit 0
+        git diff --staged --quiet || git commit -m "🤖 Auto-generated trading report $(date +'%Y-%m-%d %H:%M')"
         git push
+      continue-on-error: true
+      
+    - name: 🚨 Notify on failure
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: '🚨 Auto Report Generation Failed',
+            body: 'The automated trading report generation has failed. Please check the workflow logs.'
+          })
