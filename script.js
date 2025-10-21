@@ -1,7 +1,111 @@
+// Единый менеджер состояния приложения
+class AppState {
+    constructor() {
+        this.portfolio = {};
+        this.currentReport = null;
+        this.marketData = {};
+        this.isLoading = false;
+        this.init();
+    }
+
+    async init() {
+        await this.loadPortfolio();
+        this.updatePortfolioDisplay();
+    }
+
+    async loadPortfolio() {
+        try {
+            const saved = localStorage.getItem('trading-portfolio');
+            if (saved) {
+                this.portfolio = JSON.parse(saved);
+            } else {
+                // Загрузка из файла или использование по умолчанию
+                const response = await fetch('portfolio.json');
+                if (response.ok) {
+                    this.portfolio = await response.json();
+                } else {
+                    this.portfolio = {"SBER": 10, "GAZP": 5, "VTBR": 1000, "SPBE": 2};
+                }
+            }
+            this.validatePortfolio();
+        } catch (error) {
+            console.error('Error loading portfolio:', error);
+            this.portfolio = {"SBER": 10, "GAZP": 5, "VTBR": 1000, "SPBE": 2};
+        }
+    }
+
+    validatePortfolio() {
+        const validated = {};
+        for (const [symbol, lots] of Object.entries(this.portfolio)) {
+            if (typeof symbol === 'string' && typeof lots === 'number' && lots > 0) {
+                validated[symbol] = Math.floor(lots);
+            }
+        }
+        this.portfolio = Object.keys(validated).length > 0 ? validated : {"SBER": 10, "GAZP": 5, "VTBR": 1000, "SPBE": 2};
+    }
+
+    savePortfolio() {
+        try {
+            localStorage.setItem('trading-portfolio', JSON.stringify(this.portfolio));
+            return true;
+        } catch (error) {
+            console.error('Error saving portfolio:', error);
+            return false;
+        }
+    }
+
+    showStatus(message, type = 'info') {
+        const statusEl = document.getElementById('reportStatus');
+        if (statusEl) {
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+            
+            // Автоочистка успешных сообщений
+            if (type === 'success') {
+                setTimeout(() => {
+                    if (statusEl.textContent === message) {
+                        statusEl.textContent = '';
+                        statusEl.className = 'status';
+                    }
+                }, 5000);
+            }
+        }
+    }
+}
+
+// Инициализация глобального состояния
+const appState = new AppState();
+
 // Configuration for data sources
 const DATA_SOURCES = {
     moexAPI: 'https://iss.moex.com/iss',
     newsURL: 'https://www.moex.com/ru/news/'
+};
+
+// Кэш для данных
+const dataCache = {
+    stocks: new Map(),
+    indices: new Map(),
+    news: new Map(),
+    
+    set(key, data, category = 'stocks', ttl = 300000) { // 5 минут по умолчанию
+        const cacheKey = `${category}_${key}`;
+        this[category].set(cacheKey, {
+            data,
+            timestamp: Date.now(),
+            ttl
+        });
+    },
+    
+    get(key, category = 'stocks') {
+        const cacheKey = `${category}_${key}`;
+        const cached = this[category].get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < cached.ttl) {
+            return cached.data;
+        }
+        this[category].delete(cacheKey);
+        return null;
+    }
 };
 
 // Enhanced market data fetcher
@@ -15,30 +119,49 @@ async function fetchEnhancedMarketData(portfolioSymbols) {
         news: []
     };
 
+    if (appState.isLoading) {
+        throw new Error('Data fetch already in progress');
+    }
+
+    appState.isLoading = true;
+
     try {
         // Fetch data for all portfolio symbols
         const stockPromises = portfolioSymbols.map(symbol => 
             fetchStockData(symbol).catch(error => {
                 console.error(`Error fetching ${symbol}:`, error);
-                return null;
+                return this.generateMockStockData(symbol);
             })
         );
         
-        const stockResults = await Promise.all(stockPromises);
-        stockResults.forEach((data, index) => {
-            if (data) {
-                marketData.stocks[portfolioSymbols[index]] = data;
+        const stockResults = await Promise.allSettled(stockPromises);
+        stockResults.forEach((result, index) => {
+            if (result.status === 'fulfilled' && result.value) {
+                marketData.stocks[portfolioSymbols[index]] = result.value;
             }
         });
 
         // Fetch market indices
-        marketData.indices = await fetchMarketIndices();
+        try {
+            marketData.indices = await fetchMarketIndices();
+        } catch (error) {
+            console.error('Error fetching indices:', error);
+            marketData.indices = await this.getFallbackIndices();
+        }
         
         // Fetch market news
-        marketData.news = await fetchMarketNews();
+        try {
+            marketData.news = await fetchMarketNews();
+        } catch (error) {
+            console.error('Error fetching news:', error);
+            marketData.news = [];
+        }
         
         // Generate market summary
         marketData.marketSummary = generateMarketSummary(marketData.stocks, marketData.indices);
+        
+        // Сохраняем в глобальное состояние
+        appState.marketData = marketData;
         
         console.log('Enhanced market data fetch completed');
         return marketData;
@@ -46,11 +169,17 @@ async function fetchEnhancedMarketData(portfolioSymbols) {
     } catch (error) {
         console.error('Error in enhanced market data fetch:', error);
         throw error;
+    } finally {
+        appState.isLoading = false;
     }
 }
 
 // Fetch individual stock data from MOEX API
 async function fetchStockData(symbol) {
+    // Проверка кэша
+    const cached = dataCache.get(symbol, 'stocks');
+    if (cached) return cached;
+
     try {
         // First try main board (TQBR)
         let url = `${DATA_SOURCES.moexAPI}/engines/stock/markets/shares/boards/TQBR/securities/${symbol}.json`;
@@ -61,28 +190,38 @@ async function fetchStockData(symbol) {
             'marketdata.columns': 'LAST,OPEN,LOW,HIGH,VALUE,CHANGE,LASTTOPREVPRICE'
         };
 
-        const response = await fetch(`${url}?${new URLSearchParams(params)}`);
+        const response = await fetch(`${url}?${new URLSearchParams(params)}`, {
+            signal: AbortSignal.timeout(10000)
+        });
         
         if (!response.ok) {
             // Try foreign shares board (FQBR) for SPB stocks
             url = `${DATA_SOURCES.moexAPI}/engines/stock/markets/foreignshares/boards/FQBR/securities/${symbol}.json`;
-            const spbResponse = await fetch(`${url}?${new URLSearchParams(params)}`);
+            const spbResponse = await fetch(`${url}?${new URLSearchParams(params)}`, {
+                signal: AbortSignal.timeout(10000)
+            });
             
             if (!spbResponse.ok) {
-                throw new Error(`Failed to fetch data for ${symbol}`);
+                throw new Error(`Failed to fetch data for ${symbol}: ${response.status}`);
             }
             
             const spbData = await spbResponse.json();
-            return parseStockData(symbol, spbData, 'SPB');
+            const result = parseStockData(symbol, spbData, 'SPB');
+            dataCache.set(symbol, result, 'stocks');
+            return result;
         }
 
         const data = await response.json();
-        return parseStockData(symbol, data, 'MOEX');
+        const result = parseStockData(symbol, data, 'MOEX');
+        dataCache.set(symbol, result, 'stocks');
+        return result;
         
     } catch (error) {
         console.error(`Error fetching data for ${symbol}:`, error);
         // Return mock data as fallback
-        return generateMockStockData(symbol);
+        const mockData = generateMockStockData(symbol);
+        dataCache.set(symbol, mockData, 'stocks', 60000); // Кэшируем mock данные на 1 минуту
+        return mockData;
     }
 }
 
@@ -91,34 +230,43 @@ function parseStockData(symbol, data, source) {
     const securities = data.securities.data[0] || [];
     const marketdata = data.marketdata.data[0] || [];
     
-    const prevPrice = securities[1] || 0; // PREVADMITTEDQUOTE
-    const currentPrice = marketdata[0] || prevPrice; // LAST
-    const change = marketdata[6] || 0; // LASTTOPREVPRICE
+    const prevPrice = securities[1] || 0;
+    const currentPrice = marketdata[0] || prevPrice;
+    const change = marketdata[6] || 0;
     
+    // Валидация данных
+    if (!currentPrice || currentPrice <= 0) {
+        throw new Error(`Invalid price data for ${symbol}`);
+    }
+
     return {
         symbol: symbol,
         price: currentPrice,
-        open: marketdata[1] || currentPrice, // OPEN
-        low: marketdata[2] || currentPrice, // LOW
-        high: marketdata[3] || currentPrice, // HIGH
-        volume: marketdata[4] || 0, // VALUE
+        open: marketdata[1] || currentPrice,
+        low: marketdata[2] || currentPrice,
+        high: marketdata[3] || currentPrice,
+        volume: marketdata[4] || 0,
         change: change,
         changePercent: prevPrice ? ((change / prevPrice) * 100) : 0,
-        lotSize: securities[2] || 1, // LOTSIZE
+        lotSize: securities[2] || 1,
         source: source,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        isRealData: true
     };
 }
 
 // Fetch market indices
 async function fetchMarketIndices() {
+    const cached = dataCache.get('indices', 'indices');
+    if (cached) return cached;
+
     try {
         const indices = {};
         
-        // Fetch IMOEX (Moscow Exchange Index)
-        const imoexResponse = await fetch(
-            `${DATA_SOURCES.moexAPI}/statistics/engines/stock/markets/index/analytics/IMOEX.json?iss.meta=off`
-        );
+        const [imoexResponse, rtsResponse] = await Promise.all([
+            fetch(`${DATA_SOURCES.moexAPI}/statistics/engines/stock/markets/index/analytics/IMOEX.json?iss.meta=off`),
+            fetch(`${DATA_SOURCES.moexAPI}/statistics/engines/stock/markets/index/analytics/RTSI.json?iss.meta=off`)
+        ]);
         
         if (imoexResponse.ok) {
             const imoexData = await imoexResponse.json();
@@ -129,11 +277,6 @@ async function fetchMarketIndices() {
             };
         }
         
-        // Fetch RTSI
-        const rtsResponse = await fetch(
-            `${DATA_SOURCES.moexAPI}/statistics/engines/stock/markets/index/analytics/RTSI.json?iss.meta=off`
-        );
-        
         if (rtsResponse.ok) {
             const rtsData = await rtsResponse.json();
             const analytics = rtsData.analytics.data[0] || [];
@@ -143,45 +286,40 @@ async function fetchMarketIndices() {
             };
         }
         
+        dataCache.set('indices', indices, 'indices');
         return indices;
         
     } catch (error) {
         console.error('Error fetching market indices:', error);
-        return {
-            IMOEX: { value: 2702.44, change: -1.544 },
-            RTSI: { value: 1046.39, change: -1.545 }
-        };
+        return await this.getFallbackIndices();
     }
 }
 
-// Fetch market news (simplified - in production you'd need a proper API)
+// Fallback indices data
+async function getFallbackIndices() {
+    return {
+        IMOEX: { value: 2702.44, change: -1.544 },
+        RTSI: { value: 1046.39, change: -1.545 }
+    };
+}
+
+// Fetch market news (simplified)
 async function fetchMarketNews() {
+    const cached = dataCache.get('news', 'news');
+    if (cached) return cached;
+
     try {
-        // Note: This is a simplified example
-        // In a real application, you'd need to use a proper news API
-        // or set up a server-side proxy to avoid CORS issues
-        
+        // В реальном приложении здесь должен быть вызов к News API
         const mockNews = [
             {
                 title: "Индекс Мосбиржи стабилизируется после снижения",
                 summary: "По состоянию на 14:30 мск индекс Мосбиржи понизился на 42,39 пункта (1,544%)",
                 timestamp: new Date().toISOString(),
                 source: "FINMARKET.RU"
-            },
-            {
-                title: "Торги идут с активностью выше средней",
-                summary: "Объем торгов по акциям на ФБ ММВБ на 14:30 составил 65728,1 млн рублей",
-                timestamp: new Date().toISOString(),
-                source: "Мосбиржа"
-            },
-            {
-                title: "Мосбиржа начала торги сотым биржевым фондом",
-                summary: "Расширение линейки биржевых инвестиционных продуктов",
-                timestamp: "2025-10-20T20:56:00Z",
-                source: "Мосбиржа"
             }
         ];
         
+        dataCache.set('news', mockNews, 'news', 600000); // 10 минут
         return mockNews;
         
     } catch (error) {
@@ -198,7 +336,7 @@ function generateMarketSummary(stocksData, indices) {
     let worstPerformer = { symbol: '', change: Infinity };
 
     Object.values(stocksData).forEach(stock => {
-        if (stock.changePercent) {
+        if (stock.changePercent !== undefined) {
             totalChange += stock.changePercent;
             stockCount++;
             
@@ -229,7 +367,8 @@ function generateMockStockData(symbol) {
     const basePrices = {
         'SBER': 280.5, 'GAZP': 160.8, 'VTBR': 0.0265, 
         'SPBE': 255.7, 'MOEX': 170.7, 'LKOH': 6305.5,
-        'ROSN': 585.0, 'YNDX': 2670.0, 'GMKN': 130.0
+        'ROSN': 585.0, 'YNDX': 2670.0, 'GMKN': 130.0,
+        'MTSS': 250.0
     };
     
     const basePrice = basePrices[symbol] || 100;
@@ -255,20 +394,20 @@ function generateMockStockData(symbol) {
 // Enhanced report generator
 async function generateEnhancedReport() {
     try {
-        const portfolioSymbols = Object.keys(analyzer.portfolio);
+        const portfolioSymbols = Object.keys(appState.portfolio);
         
         if (portfolioSymbols.length === 0) {
             throw new Error('Portfolio is empty. Please add assets to generate a report.');
         }
 
-        showStatus('🔄 Collecting enhanced market data...', 'info');
+        appState.showStatus('🔄 Collecting enhanced market data...', 'info');
         
         const marketData = await fetchEnhancedMarketData(portfolioSymbols);
-        const portfolioValue = analyzer.calculatePortfolioValue(marketData.stocks);
+        const portfolioValue = calculatePortfolioValue(marketData.stocks);
         
         const report = {
             timestamp: new Date().toISOString(),
-            portfolioStructure: analyzer.portfolio,
+            portfolioStructure: appState.portfolio,
             portfolioValue: portfolioValue,
             marketData: marketData,
             marketSummary: marketData.marketSummary
@@ -282,18 +421,44 @@ async function generateEnhancedReport() {
     }
 }
 
+// Calculate portfolio value
+function calculatePortfolioValue(stocksData) {
+    let totalValue = 0;
+    const positions = {};
+
+    for (const [symbol, lots] of Object.entries(appState.portfolio)) {
+        const stock = stocksData[symbol];
+        if (stock && stock.price) {
+            const lotSize = stock.lotSize || 1;
+            const positionValue = stock.price * lots * lotSize;
+            
+            positions[symbol] = {
+                lots: lots,
+                lot_size: lotSize,
+                position_value: positionValue
+            };
+            totalValue += positionValue;
+        }
+    }
+
+    return {
+        totalValue: totalValue,
+        positions: positions
+    };
+}
+
 // Enhanced report formatter
 function formatEnhancedReport(report) {
     let output = [];
     
     output.push("🤖 РАСШИРЕННЫЙ ОТЧЕТ ДЛЯ AI-АНАЛИТИКА");
-    output.push("=" * 60);
+    output.push("=".repeat(60));
     output.push(`Сгенерировано: ${new Date(report.timestamp).toLocaleString('ru-RU')}`);
     output.push("");
     
     // Market Summary Section
     output.push("📈 СВОДКА РЫНКА:");
-    output.push("-" * 40);
+    output.push("-".repeat(40));
     output.push(`Индекс МосБиржи: ${report.marketData.indices.IMOEX?.value || 'N/A'} (${report.marketData.indices.IMOEX?.change || 'N/A'}%)`);
     output.push(`Индекс РТС: ${report.marketData.indices.RTSI?.value || 'N/A'} (${report.marketData.indices.RTSI?.change || 'N/A'}%)`);
     output.push(`Среднее изменение портфеля: ${report.marketSummary.averageChange?.toFixed(2) || 'N/A'}%`);
@@ -304,7 +469,7 @@ function formatEnhancedReport(report) {
     
     // Portfolio Structure
     output.push("📊 СТРУКТУРА ПОРТФЕЛЯ:");
-    output.push("-" * 40);
+    output.push("-".repeat(40));
     Object.entries(report.portfolioStructure).forEach(([symbol, lots]) => {
         output.push(`${symbol}: ${lots} лотов`);
     });
@@ -312,7 +477,7 @@ function formatEnhancedReport(report) {
     
     // Detailed Position Analysis
     output.push("💰 ДЕТАЛЬНЫЙ АНАЛИЗ ПОЗИЦИЙ:");
-    output.push("-" * 40);
+    output.push("-".repeat(40));
     const totalValue = report.portfolioValue.totalValue;
     
     Object.entries(report.portfolioValue.positions).forEach(([symbol, position]) => {
@@ -325,7 +490,7 @@ function formatEnhancedReport(report) {
         output.push(`  Текущая цена: ${marketData?.price?.toFixed(2) || 'N/A'} RUB`);
         output.push(`  Изменение: ${marketData?.changePercent?.toFixed(2) || 'N/A'}%`);
         output.push(`  Стоимость позиции: ${value.toLocaleString('ru-RU')} RUB (${percent.toFixed(1)}%)`);
-        output.push(`  Источник данных: ${marketData?.source || 'N/A'}`);
+        output.push(`  Источник данных: ${marketData?.source || 'N/A'} ${marketData?.isMockData ? '(MOCK)' : ''}`);
         output.push("");
     });
     
@@ -335,7 +500,7 @@ function formatEnhancedReport(report) {
     // Market News Section
     if (report.marketData.news && report.marketData.news.length > 0) {
         output.push("📰 ПОСЛЕДНИЕ НОВОСТИ РЫНКА:");
-        output.push("-" * 40);
+        output.push("-".repeat(40));
         report.marketData.news.forEach((newsItem, index) => {
             output.push(`${index + 1}. ${newsItem.title}`);
             output.push(`   ${newsItem.summary}`);
@@ -346,7 +511,7 @@ function formatEnhancedReport(report) {
     
     // AI Request Section
     output.push("🎯 ЗАПРОС К AI-АНАЛИТИКУ:");
-    output.push("-" * 40);
+    output.push("-".repeat(40));
     output.push("На основе представленных данных проанализируйте:");
     output.push("1. Текущее состояние портфеля и распределение активов");
     output.push("2. Влияние рыночной конъюнктуры на позиции портфеля");
@@ -354,7 +519,7 @@ function formatEnhancedReport(report) {
     output.push("4. Оценка рисков и возможности хеджирования");
     output.push("5. Краткосрочные и долгосрочные перспективы активов");
     output.push("");
-    output.push("=" * 60);
+    output.push("=".repeat(60));
     
     return output.join('\n');
 }
@@ -363,17 +528,146 @@ function formatEnhancedReport(report) {
 async function generateReport() {
     try {
         const report = await generateEnhancedReport();
-        analyzer.currentReport = report;
-        analyzer.displayReport();
-        analyzer.showStatus('✅ Расширенный отчет сгенерирован!', 'success');
+        appState.currentReport = report;
+        displayReport();
+        appState.showStatus('✅ Расширенный отчет сгенерирован!', 'success');
         
         // Auto-save the enhanced report
-        const filename = analyzer.saveReportToFile(report, "enhanced");
+        const filename = saveReportToFile(report, "enhanced");
         if (filename) {
-            analyzer.showStatus(`💾 Отчет сохранен: ${filename}`, 'success');
+            appState.showStatus(`💾 Отчет сохранен: ${filename}`, 'success');
         }
         
     } catch (error) {
-        analyzer.showStatus(`❌ Ошибка генерации отчета: ${error.message}`, 'error');
+        appState.showStatus(`❌ Ошибка генерации отчета: ${error.message}`, 'error');
     }
 }
+
+// Display report in UI
+function displayReport() {
+    const output = document.getElementById('reportOutput');
+    if (output && appState.currentReport) {
+        output.textContent = appState.currentReport;
+    }
+}
+
+// Save report to file
+function saveReportToFile(report, prefix = 'report') {
+    try {
+        const blob = new Blob([report], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${prefix}_${new Date().toISOString().slice(0, 10)}_${Date.now()}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        return a.download;
+    } catch (error) {
+        console.error('Error saving report:', error);
+        return null;
+    }
+}
+
+// UI Interaction Functions
+function savePortfolio() {
+    try {
+        const input = document.getElementById('portfolioInput');
+        if (!input) return;
+        
+        const lines = input.value.split('\n');
+        const newPortfolio = {};
+        
+        lines.forEach(line => {
+            const [symbol, lots]= line.split(':').map(s => s.trim());
+            if (symbol && !isNaN(parseFloat(lots)) && isFinite(lots)) {
+                newPortfolio[symbol] = parseFloat(lots);
+            }
+        });
+        
+        appState.portfolio = newPortfolio;
+        appState.validatePortfolio();
+        
+        if (appState.savePortfolio()) {
+            appState.showStatus('✅ Портфель сохранен!', 'success');
+            updatePortfolioDisplay();
+        } else {
+            appState.showStatus('❌ Ошибка сохранения портфеля', 'error');
+        }
+    } catch (error) {
+        appState.showStatus(`❌ Ошибка: ${error.message}`, 'error');
+    }
+}
+
+function loadPortfolio() {
+    try {
+        const input = document.getElementById('portfolioInput');
+        if (input) {
+            const lines = [];
+            for (const [symbol, lots] of Object.entries(appState.portfolio)) {
+                lines.push(`${symbol}:${lots}`);
+            }
+            input.value = lines.join('\n');
+        }
+        appState.showStatus('✅ Портфель загружен в редактор!', 'success');
+    } catch (error) {
+        appState.showStatus(`❌ Ошибка загрузки портфеля: ${error.message}`, 'error');
+    }
+}
+
+function updatePortfolioDisplay() {
+    const display = document.getElementById('portfolioDisplay');
+    if (!display) return;
+
+    if (Object.keys(appState.portfolio).length === 0) {
+        display.innerHTML = '<p>Портфель пуст</p>';
+        return;
+    }
+
+    let html = '';
+    for (const [symbol, lots] of Object.entries(appState.portfolio)) {
+        html += `<div class="asset-item">${symbol}: ${lots} лотов</div>`;
+    }
+    display.innerHTML = html;
+}
+
+function copyReport() {
+    if (!appState.currentReport) {
+        appState.showStatus('Нет отчета для копирования', 'error');
+        return;
+    }
+    
+    navigator.clipboard.writeText(appState.currentReport).then(() => {
+        appState.showStatus('✅ Отчет скопирован в буфер обмена!', 'success');
+    }).catch(err => {
+        appState.showStatus('❌ Ошибка копирования: ' + err, 'error');
+    });
+}
+
+function downloadReport() {
+    if (!appState.currentReport) {
+        appState.showStatus('Нет отчета для скачивания', 'error');
+        return;
+    }
+    
+    const filename = saveReportToFile(appState.currentReport, "trading_report");
+    if (filename) {
+        appState.showStatus(`✅ Отчет сохранен как ${filename}`, 'success');
+    } else {
+        appState.showStatus('❌ Ошибка сохранения отчета', 'error');
+    }
+}
+
+function sendToAI() {
+    appState.showStatus('🤖 Функция отправки AI-аналитику в разработке', 'info');
+}
+
+function scheduleAutoReport() {
+    appState.showStatus('⏰ Автоотчеты выполняются через GitHub Actions', 'info');
+}
+
+// Инициализация при загрузке
+document.addEventListener('DOMContentLoaded', function() {
+    updatePortfolioDisplay();
+});
